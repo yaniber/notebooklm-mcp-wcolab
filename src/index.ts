@@ -582,6 +582,49 @@ class NotebookLMMCPServer {
             );
             break;
 
+          // ── Colab Bridge Tools ────────────────────────────────────────────
+          case 'colab_execute_python':
+            result = await this.toolHandlers.handleColabExecutePython(
+              args as { code: string; timeout_ms?: number }
+            );
+            break;
+
+          case 'colab_install_package':
+            result = await this.toolHandlers.handleColabInstallPackage(
+              args as { package: string }
+            );
+            break;
+
+          case 'colab_list_variables':
+            result = await this.toolHandlers.handleColabListVariables();
+            break;
+
+          case 'colab_get_output':
+            result = await this.toolHandlers.handleColabGetOutput(
+              args as { cell_id: string }
+            );
+            break;
+
+          case 'colab_upload_file':
+            result = await this.toolHandlers.handleColabUploadFile(
+              args as { file_path: string; destination: string }
+            );
+            break;
+
+          case 'colab_download_file':
+            result = await this.toolHandlers.handleColabDownloadFile(
+              args as { colab_path: string }
+            );
+            break;
+
+          case 'colab_get_session_status':
+            result = await this.toolHandlers.handleColabGetSessionStatus();
+            break;
+
+          case 'colab_health_check':
+            result = await this.toolHandlers.handleColabHealthCheck();
+            break;
+
           default:
             log.error(`❌ [MCP] Unknown tool: ${name}`);
             return {

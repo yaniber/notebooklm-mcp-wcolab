@@ -16,6 +16,17 @@
  */
 
 import fs from 'fs';
+import { ColabBridgeClient } from '../colab/colab-bridge.js';
+import type {
+  ExecuteResult,
+  InstallResult,
+  ColabVariable,
+  CellOutput,
+  UploadResult,
+  DownloadResult,
+  ColabSessionStatus,
+  ColabHealthStatus,
+} from '../colab/types.js';
 import { SessionManager } from '../session/session-manager.js';
 import { AuthManager } from '../auth/auth-manager.js';
 import { NotebookLibrary } from '../library/notebook-library.js';
@@ -1123,6 +1134,129 @@ User: "Yes" → call remove_notebook`,
             description: 'Show browser window during scraping. Default: false (headless).',
           },
         },
+      },
+    },
+
+    // ── Colab Bridge Tools ──────────────────────────────────────────────────
+    {
+      name: 'colab_execute_python',
+      description:
+        'Execute Python code in a running Google Colab runtime via colab-mcp WebSocket bridge.\n\n' +
+        'Returns stdout, stderr, rich cell outputs (text, HTML, images), and a cell_id that can\n' +
+        'be used later with colab_get_output.\n\n' +
+        'Use cases:\n' +
+        '- Run data analysis / ML code in Colab and pipe results to NotebookLM\n' +
+        '- Train models or process data, then ask NotebookLM to explain the results\n' +
+        '- Execute multi-step workflows across Colab + NotebookLM in the same session\n\n' +
+        'Requires: colab-mcp WebSocket server reachable at COLAB_WS_URL (default: ws://localhost:8765).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          code: {
+            type: 'string',
+            description: 'Python source code to execute in the Colab runtime.',
+          },
+          timeout_ms: {
+            type: 'number',
+            description: 'Execution timeout in milliseconds. Default: 30000.',
+          },
+        },
+        required: ['code'],
+      },
+    },
+    {
+      name: 'colab_install_package',
+      description:
+        'Install a Python package via pip in the active Google Colab runtime.\n\n' +
+        'Example: "numpy==1.26", "pandas", "torch>=2.0"',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          package: {
+            type: 'string',
+            description: 'Package name with optional version spec, e.g. "numpy==1.26".',
+          },
+        },
+        required: ['package'],
+      },
+    },
+    {
+      name: 'colab_list_variables',
+      description:
+        'List all variables currently held in the Google Colab kernel memory.\n\n' +
+        'Returns name, type, and a string representation of each variable.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+    },
+    {
+      name: 'colab_get_output',
+      description:
+        'Retrieve the output of a previously executed Colab cell by its cell_id.\n\n' +
+        'The cell_id is returned by colab_execute_python.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          cell_id: {
+            type: 'string',
+            description: 'Cell ID returned by colab_execute_python.',
+          },
+        },
+        required: ['cell_id'],
+      },
+    },
+    {
+      name: 'colab_upload_file',
+      description:
+        'Upload a local file into the Google Colab runtime at the specified /content/ path.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          file_path: {
+            type: 'string',
+            description: 'Absolute local path to the file to upload.',
+          },
+          destination: {
+            type: 'string',
+            description: 'Target path inside the Colab runtime, e.g. "/content/data.csv".',
+          },
+        },
+        required: ['file_path', 'destination'],
+      },
+    },
+    {
+      name: 'colab_download_file',
+      description:
+        'Download a file from the Google Colab runtime. Returns the file content as base64.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          colab_path: {
+            type: 'string',
+            description: 'Path inside the Colab runtime, e.g. "/content/output.csv".',
+          },
+        },
+        required: ['colab_path'],
+      },
+    },
+    {
+      name: 'colab_get_session_status',
+      description:
+        'Get the current status of the Google Colab kernel session (connected / disconnected / busy).',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+    },
+    {
+      name: 'colab_health_check',
+      description:
+        'Perform a health check on the colab-mcp WebSocket bridge.\n\n' +
+        'Returns connection status plus GPU/TPU/RAM information from the Colab runtime.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
       },
     },
   ];
@@ -3442,11 +3576,184 @@ export class ToolHandlers {
     }
   }
 
+  // ── Colab Bridge Handlers ───────────────────────────────────────────────────
+
+  /**
+   * Ensure the ColabBridgeClient is connected, connecting on first use.
+   */
+  private async getColabClient(): Promise<ColabBridgeClient> {
+    const client = ColabBridgeClient.getInstance();
+    if (!client.isConnected()) {
+      await client.connect();
+    }
+    return client;
+  }
+
+  /**
+   * Handle colab_execute_python tool
+   */
+  async handleColabExecutePython(args: {
+    code: string;
+    timeout_ms?: number;
+  }): Promise<ToolResult<ExecuteResult>> {
+    const { code, timeout_ms } = args;
+    log.info(`🔧 [TOOL] colab_execute_python called`);
+    try {
+      const client = await this.getColabClient();
+      const result = await client.executeCode(code, timeout_ms);
+      log.success(`✅ [TOOL] colab_execute_python completed (cell_id: ${result.cell_id})`);
+      return { success: true, data: result };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] colab_execute_python failed: ${errorMessage}`);
+      return { success: false, error: errorMessage };
+    }
+  }
+
+  /**
+   * Handle colab_install_package tool
+   */
+  async handleColabInstallPackage(args: {
+    package: string;
+  }): Promise<ToolResult<InstallResult>> {
+    const { package: pkg } = args;
+    log.info(`🔧 [TOOL] colab_install_package called: ${pkg}`);
+    try {
+      const client = await this.getColabClient();
+      const result = await client.installPackage(pkg);
+      log.success(`✅ [TOOL] colab_install_package completed: ${pkg}`);
+      return { success: true, data: result };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] colab_install_package failed: ${errorMessage}`);
+      return { success: false, error: errorMessage };
+    }
+  }
+
+  /**
+   * Handle colab_list_variables tool
+   */
+  async handleColabListVariables(): Promise<ToolResult<ColabVariable[]>> {
+    log.info(`🔧 [TOOL] colab_list_variables called`);
+    try {
+      const client = await this.getColabClient();
+      const result = await client.listVariables();
+      log.success(`✅ [TOOL] colab_list_variables returned ${result.length} variables`);
+      return { success: true, data: result };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] colab_list_variables failed: ${errorMessage}`);
+      return { success: false, error: errorMessage };
+    }
+  }
+
+  /**
+   * Handle colab_get_output tool
+   */
+  async handleColabGetOutput(args: { cell_id: string }): Promise<ToolResult<CellOutput>> {
+    const { cell_id } = args;
+    log.info(`🔧 [TOOL] colab_get_output called: ${cell_id}`);
+    try {
+      const client = await this.getColabClient();
+      const result = await client.getCellOutput(cell_id);
+      log.success(`✅ [TOOL] colab_get_output completed`);
+      return { success: true, data: result };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] colab_get_output failed: ${errorMessage}`);
+      return { success: false, error: errorMessage };
+    }
+  }
+
+  /**
+   * Handle colab_upload_file tool
+   */
+  async handleColabUploadFile(args: {
+    file_path: string;
+    destination: string;
+  }): Promise<ToolResult<UploadResult>> {
+    const { file_path, destination } = args;
+    log.info(`🔧 [TOOL] colab_upload_file called: ${file_path} → ${destination}`);
+    try {
+      if (!fs.existsSync(file_path)) {
+        throw new Error(`File not found: ${file_path}`);
+      }
+      const client = await this.getColabClient();
+      const result = await client.uploadFile(file_path, destination);
+      log.success(`✅ [TOOL] colab_upload_file completed: ${result.size_bytes} bytes`);
+      return { success: true, data: result };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] colab_upload_file failed: ${errorMessage}`);
+      return { success: false, error: errorMessage };
+    }
+  }
+
+  /**
+   * Handle colab_download_file tool
+   */
+  async handleColabDownloadFile(args: {
+    colab_path: string;
+  }): Promise<ToolResult<DownloadResult>> {
+    const { colab_path } = args;
+    log.info(`🔧 [TOOL] colab_download_file called: ${colab_path}`);
+    try {
+      const client = await this.getColabClient();
+      const result = await client.downloadFile(colab_path);
+      log.success(`✅ [TOOL] colab_download_file completed: ${result.size_bytes} bytes`);
+      return { success: true, data: result };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] colab_download_file failed: ${errorMessage}`);
+      return { success: false, error: errorMessage };
+    }
+  }
+
+  /**
+   * Handle colab_get_session_status tool
+   */
+  async handleColabGetSessionStatus(): Promise<ToolResult<ColabSessionStatus>> {
+    log.info(`🔧 [TOOL] colab_get_session_status called`);
+    try {
+      const client = await this.getColabClient();
+      const result = await client.getSessionStatus();
+      log.success(`✅ [TOOL] colab_get_session_status: ${result.status}`);
+      return { success: true, data: result };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] colab_get_session_status failed: ${errorMessage}`);
+      return { success: false, error: errorMessage };
+    }
+  }
+
+  /**
+   * Handle colab_health_check tool
+   */
+  async handleColabHealthCheck(): Promise<ToolResult<ColabHealthStatus>> {
+    log.info(`🔧 [TOOL] colab_health_check called`);
+    try {
+      const client = await this.getColabClient();
+      const result = await client.healthCheck();
+      log.success(`✅ [TOOL] colab_health_check: ${result.status}`);
+      return { success: true, data: result };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] colab_health_check failed: ${errorMessage}`);
+      return { success: false, error: errorMessage };
+    }
+  }
+
   /**
    * Cleanup all resources (called on server shutdown)
    */
   async cleanup(): Promise<void> {
     log.info(`🧹 Cleaning up tool handlers...`);
+    // Disconnect Colab bridge if connected
+    const colabBridge = ColabBridgeClient.getInstance();
+    if (colabBridge.isConnected()) {
+      colabBridge.disconnect();
+      log.info('🔌 [colab-bridge] Disconnected');
+    }
     await this.sessionManager.closeAllSessions();
     log.success(`✅ Tool handlers cleanup complete`);
   }
