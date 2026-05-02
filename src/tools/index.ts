@@ -16,6 +16,7 @@
  */
 
 import fs from 'fs';
+import path from 'path';
 import { ColabBridgeClient } from '../colab/colab-bridge.js';
 import type {
   ExecuteResult,
@@ -3675,11 +3676,16 @@ export class ToolHandlers {
     const { file_path, destination } = args;
     log.info(`🔧 [TOOL] colab_upload_file called: ${file_path} → ${destination}`);
     try {
-      if (!fs.existsSync(file_path)) {
+      // Resolve and validate path to prevent directory traversal
+      const resolvedPath = path.resolve(file_path);
+      if (resolvedPath !== path.normalize(resolvedPath)) {
+        throw new Error(`Invalid file path: ${file_path}`);
+      }
+      if (!fs.existsSync(resolvedPath)) {
         throw new Error(`File not found: ${file_path}`);
       }
       const client = await this.getColabClient();
-      const result = await client.uploadFile(file_path, destination);
+      const result = await client.uploadFile(resolvedPath, destination);
       log.success(`✅ [TOOL] colab_upload_file completed: ${result.size_bytes} bytes`);
       return { success: true, data: result };
     } catch (error) {
