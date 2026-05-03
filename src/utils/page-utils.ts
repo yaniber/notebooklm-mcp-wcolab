@@ -594,15 +594,11 @@ async function extractLatestText(
   // Final fallback: JavaScript evaluation
   try {
     const fallbackText = await page.evaluate((): string | null => {
-      // @ts-expect-error - DOM types available in browser context
       const unique = new Set<Element>();
-      // @ts-expect-error - DOM types available in browser context
       const isVisible = (el: Element): boolean => {
-        // @ts-expect-error - DOM types available in browser context
         if (!el || !(el as HTMLElement).isConnected) return false;
         const rect = el.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) return false;
-        // @ts-expect-error - window available in browser context
         const style = window.getComputedStyle(el as HTMLElement);
         if (
           style.visibility === 'hidden' ||
@@ -625,13 +621,11 @@ async function extractLatestText(
 
       const candidates: string[] = [];
       for (const selector of selectors) {
-        // @ts-expect-error - document available in browser context
-        for (const el of document.querySelectorAll(selector)) {
+        for (const el of Array.from(document.querySelectorAll(selector))) {
           if (!isVisible(el)) continue;
           if (unique.has(el)) continue;
           unique.add(el);
 
-          // @ts-expect-error - DOM types available in browser context
           const text = (el as HTMLElement).innerText || (el as HTMLElement).textContent || '';
           if (!text.trim()) continue;
 
