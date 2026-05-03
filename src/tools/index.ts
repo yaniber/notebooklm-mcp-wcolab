@@ -19,7 +19,12 @@ import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
 import { z } from 'zod';
-import { ColabBridgeClient } from '../colab/colab-bridge.js';
+import type { Page } from 'patchright';
+import {
+  ColabBridgeClient,
+  resolveColabConnectionConfig,
+} from '../colab/colab-bridge.js';
+import { injectColabBridge } from '../colab/colab-bootstrap.js';
 import type {
   ExecuteResult,
   InstallResult,
@@ -34,6 +39,7 @@ import type {
   RuntimeManageResult,
   NotebookExecuteResult,
   ArtifactSyncResult,
+  ColabBridgeBootstrapResult,
 } from '../colab/types.js';
 import { SessionManager } from '../session/session-manager.js';
 import { AuthManager } from '../auth/auth-manager.js';
@@ -1355,6 +1361,41 @@ User: "Yes" → call remove_notebook`,
         properties: {},
       },
     },
+    {
+      name: 'bootstrap_colab_bridge',
+      description:
+        'Open a Colab notebook in the shared browser context and inject a live WebSocket bridge.\n\n' +
+        'Use this when the Colab runtime is already available and the browser page needs to connect to a sidecar colab-mcp server.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          notebook_url: {
+            type: 'string',
+            description:
+              'Colab notebook URL to open in the shared browser context (must be a colab.google.com or colab.research.google.com URL).',
+          },
+          ws_url: {
+            type: 'string',
+            description:
+              'Optional WebSocket URL for the bridge. Defaults to COLAB_WS_URL or ws://localhost:8765.',
+          },
+          access_token: {
+            type: 'string',
+            description:
+              'Optional access token for the WebSocket bridge. If provided, it is appended as access_token=... in the bridge URL.',
+          },
+          show_browser: {
+            type: 'boolean',
+            description: 'Show the browser while bootstrapping the Colab bridge. Default: false.',
+          },
+          timeout_ms: {
+            type: 'number',
+            description: 'Navigation and bridge bootstrap timeout in milliseconds. Default: 30000.',
+          },
+        },
+        required: ['notebook_url'],
+      },
+    },
   ];
 }
 
@@ -1365,6 +1406,22 @@ const setupColabAuthSchema = z.object({
 const manageColabRuntimeSchema = z.object({
   action: z.enum(['allocate', 'stop', 'delete']),
   instance_type: z.enum(['T4', 'A100', 'TPU', 'CPU']).optional(),
+  timeout_ms: z.number().int().positive().optional(),
+});
+
+const bootstrapColabBridgeSchema = z.object({
+  notebook_url: z
+    .string()
+    .trim()
+    .url()
+    .refine(
+      (value) =>
+        value.includes('colab.google.com') || value.includes('colab.research.google.com'),
+      'notebook_url must target a Colab notebook'
+    ),
+  ws_url: z.string().trim().url().optional(),
+  access_token: z.string().trim().min(1).optional(),
+  show_browser: z.boolean().optional(),
   timeout_ms: z.number().int().positive().optional(),
 });
 
@@ -3857,6 +3914,67 @@ export class ToolHandlers {
       const errorMessage = error instanceof Error ? error.message : String(error);
       log.error(`❌ [TOOL] manage_colab_runtime failed: ${errorMessage}`);
       return { success: false, error: errorMessage };
+    }
+  }
+
+  /**
+   * Handle bootstrap_colab_bridge tool
+   */
+  async handleBootstrapColabBridge(args: {
+    notebook_url: string;
+    ws_url?: string;
+    access_token?: string;
+    show_browser?: boolean;
+    timeout_ms?: number;
+  }): Promise<ToolResult<ColabBridgeBootstrapResult>> {
+    const parsed = bootstrapColabBridgeSchema.safeParse(args);
+    if (!parsed.success) {
+      return {
+        success: false,
+        error: formatZodError(parsed.error),
+      };
+    }
+
+    const { notebook_url, ws_url, access_token, show_browser, timeout_ms } = parsed.data;
+    const connectionConfig = resolveColabConnectionConfig();
+    const resolvedWsUrl = ws_url ?? connectionConfig.wsUrl;
+    const resolvedAccessToken = access_token ?? connectionConfig.accessToken;
+    const overrideHeadless = show_browser === undefined ? undefined : !show_browser;
+
+    log.info(`🔧 [TOOL] bootstrap_colab_bridge called: ${notebook_url}`);
+
+    let page: Page | null = null;
+    let bootstrapped = false;
+
+    try {
+      const context = await this.sessionManager.getSharedContextManager().getOrCreateContext(
+        overrideHeadless
+      );
+      page = await context.newPage();
+
+      await page.goto(notebook_url, {
+        waitUntil: 'domcontentloaded',
+        timeout: timeout_ms ?? 30_000,
+      });
+
+      const result = await injectColabBridge(page, {
+        notebookUrl: notebook_url,
+        wsUrl: resolvedWsUrl,
+        accessToken: resolvedAccessToken,
+        timeoutMs: timeout_ms,
+      });
+
+      bootstrapped = true;
+      log.success(`✅ [TOOL] bootstrap_colab_bridge completed: ${result.message}`);
+      return { success: true, data: result };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] bootstrap_colab_bridge failed: ${errorMessage}`);
+      return { success: false, error: errorMessage };
+    } finally {
+      if (!bootstrapped && page) {
+        await page.close().catch(() => undefined);
+      }
     }
   }
 

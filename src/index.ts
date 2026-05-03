@@ -658,6 +658,18 @@ class NotebookLMMCPServer {
             result = await this.toolHandlers.handleColabHealthCheck();
             break;
 
+          case 'bootstrap_colab_bridge':
+            result = await this.toolHandlers.handleBootstrapColabBridge(
+              args as {
+                notebook_url: string;
+                ws_url?: string;
+                access_token?: string;
+                show_browser?: boolean;
+                timeout_ms?: number;
+              }
+            );
+            break;
+
           default:
             log.error(`❌ [MCP] Unknown tool: ${name}`);
             return {

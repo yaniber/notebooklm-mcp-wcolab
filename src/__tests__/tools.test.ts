@@ -134,6 +134,7 @@ describe('ToolHandlers', () => {
       expect(toolNames).toContain('setup_auth');
       expect(toolNames).toContain('de_auth');
       expect(toolNames).toContain('get_health');
+      expect(toolNames).toContain('bootstrap_colab_bridge');
     });
 
     it('should include cleanup tool', () => {

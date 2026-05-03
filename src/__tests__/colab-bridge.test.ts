@@ -38,11 +38,13 @@ async function stopServer(wss: WebSocketServer): Promise<void> {
 
 describe('ColabBridgeClient', () => {
   let ColabBridgeClient: typeof import('../colab/colab-bridge.js').ColabBridgeClient;
+  let resolveColabConnectionConfig: typeof import('../colab/colab-bridge.js').resolveColabConnectionConfig;
 
   beforeEach(async () => {
     jest.resetModules();
     const mod = await import('../colab/colab-bridge.js');
     ColabBridgeClient = mod.ColabBridgeClient;
+    resolveColabConnectionConfig = mod.resolveColabConnectionConfig;
     ColabBridgeClient.resetInstance();
   });
 
@@ -64,6 +66,33 @@ describe('ColabBridgeClient', () => {
       ColabBridgeClient.resetInstance();
       const b = ColabBridgeClient.getInstance('ws://localhost:9999');
       expect(a).not.toBe(b);
+    });
+  });
+
+  describe('resolveColabConnectionConfig', () => {
+    it('uses COLAB_WS_URL and appends access token when provided', () => {
+      const previousUrl = process.env.COLAB_WS_URL;
+      const previousToken = process.env.COLAB_WS_ACCESS_TOKEN;
+
+      try {
+        process.env.COLAB_WS_URL = 'ws://colab-mcp:8765';
+        process.env.COLAB_WS_ACCESS_TOKEN = 'test-token';
+
+        const config = resolveColabConnectionConfig();
+        expect(config.wsUrl).toContain('ws://colab-mcp:8765');
+        expect(config.wsUrl).toContain('access_token=test-token');
+      } finally {
+        if (previousUrl === undefined) {
+          delete process.env.COLAB_WS_URL;
+        } else {
+          process.env.COLAB_WS_URL = previousUrl;
+        }
+        if (previousToken === undefined) {
+          delete process.env.COLAB_WS_ACCESS_TOKEN;
+        } else {
+          process.env.COLAB_WS_ACCESS_TOKEN = previousToken;
+        }
+      }
     });
   });
 

@@ -35,6 +35,9 @@ services:
       - HTTP_PORT=3000
       - HTTP_HOST=0.0.0.0
 
+      # Colab bridge (optional sidecar)
+      - COLAB_WS_URL=ws://colab-mcp:8765
+
       # Browser settings
       - HEADLESS=true
       - STEALTH_ENABLED=true
@@ -77,6 +80,33 @@ services:
       options:
         max-size: '10m'
         max-file: '3'
+
+  colab-mcp:
+    image: ghcr.io/astral-sh/uv:python3.11-bookworm
+    container_name: colab-mcp
+    command: ['uvx', 'git+https://github.com/googlecolab/colab-mcp']
+
+    # Expose the bridge endpoint for the browser-side Colab connection
+    ports:
+      - '8765:8765'
+
+    # Shared profile/state volume so both browser-facing workflows reuse the same Google session
+    volumes:
+      - ./deploy-package/data:/data
+
+    environment:
+      - DATA_DIR=/data
+      - PYTHONUNBUFFERED=1
+
+    restart: unless-stopped
+
+    # This container is a WebSocket bridge only; the health check is a simple TCP readiness probe.
+    healthcheck:
+      test: ['CMD-SHELL', "python - <<'PY'\nimport socket, sys\ntry:\n    s = socket.create_connection(('127.0.0.1', 8765), timeout=2)\n    s.close()\nexcept OSError:\n    sys.exit(1)\nPY"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
 # Named volumes for persistence
 volumes:

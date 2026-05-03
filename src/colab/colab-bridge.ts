@@ -39,13 +39,71 @@ import type {
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
-function resolveWsUrl(): string {
-  if (process.env.COLAB_WS_URL) {
-    return process.env.COLAB_WS_URL.trim();
+export interface ColabConnectionConfig {
+  wsUrl: string;
+  accessToken?: string;
+}
+
+function readEnvValue(...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = process.env[key]?.trim();
+    if (value) {
+      return value;
+    }
   }
-  const host = (process.env.COLAB_WS_HOST ?? 'localhost').trim();
-  const port = parseInt(process.env.COLAB_WS_PORT ?? '8765', 10);
-  return `ws://${host}:${port}`;
+  return undefined;
+}
+
+function appendAccessToken(wsUrl: string, accessToken?: string): string {
+  if (!accessToken) {
+    return wsUrl;
+  }
+
+  try {
+    const url = new URL(wsUrl);
+    if (!url.searchParams.has('access_token')) {
+      url.searchParams.set('access_token', accessToken);
+    }
+    return url.toString();
+  } catch {
+    const separator = wsUrl.includes('?') ? '&' : '?';
+    return `${wsUrl}${separator}access_token=${encodeURIComponent(accessToken)}`;
+  }
+}
+
+function redactWsUrl(wsUrl: string): string {
+  try {
+    const url = new URL(wsUrl);
+    if (url.searchParams.has('access_token')) {
+      url.searchParams.set('access_token', '***');
+    }
+    return url.toString();
+  } catch {
+    return wsUrl.replace(/access_token=[^&]+/i, 'access_token=***');
+  }
+}
+
+export function resolveColabConnectionConfig(): ColabConnectionConfig {
+  const baseUrl =
+    readEnvValue('COLAB_WS_URL') ??
+    `ws://${readEnvValue('COLAB_WS_HOST') ?? 'localhost'}:${readEnvValue('COLAB_WS_PORT') ?? '8765'}`;
+  const accessToken = readEnvValue('COLAB_WS_ACCESS_TOKEN', 'COLAB_ACCESS_TOKEN');
+
+  try {
+    const parsedUrl = new URL(baseUrl);
+    if (parsedUrl.searchParams.has('access_token')) {
+      return {
+        wsUrl: parsedUrl.toString(),
+      };
+    }
+  } catch {
+    // Fall through and append the token if present.
+  }
+
+  return {
+    wsUrl: appendAccessToken(baseUrl, accessToken),
+    accessToken,
+  };
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -66,9 +124,12 @@ export class ColabBridgeClient {
   private ws: WebSocket | null = null;
   private pending: Map<string, PendingCall> = new Map();
   private _url: string;
+  private _accessToken?: string;
 
   private constructor(url?: string) {
-    this._url = url ?? resolveWsUrl();
+    const connectionConfig = resolveColabConnectionConfig();
+    this._url = url ?? connectionConfig.wsUrl;
+    this._accessToken = connectionConfig.accessToken;
   }
 
   /**
@@ -96,8 +157,9 @@ export class ColabBridgeClient {
     }
 
     return new Promise((resolve, reject) => {
-      log.info(`🔌 [colab-bridge] Connecting to ${this._url} …`);
-      const ws = new WebSocket(this._url);
+      const wsUrl = appendAccessToken(this._url, this._accessToken);
+      log.info(`🔌 [colab-bridge] Connecting to ${redactWsUrl(wsUrl)} …`);
+      const ws = new WebSocket(wsUrl);
 
       ws.once('open', () => {
         this.ws = ws;

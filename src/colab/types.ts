@@ -104,6 +104,15 @@ export interface ColabHealthStatus {
   message?: string;
 }
 
+/** Returned by a browser bridge bootstrap/injection helper */
+export interface ColabBridgeBootstrapResult {
+  notebookUrl: string;
+  wsUrl: string;
+  connected: boolean;
+  readyState: number;
+  message: string;
+}
+
 // ─── Runtime lifecycle / notebook execution ────────────────────────────────
 
 export type ColabRuntimeAction = 'allocate' | 'stop' | 'delete';
