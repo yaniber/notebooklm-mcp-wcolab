@@ -3872,10 +3872,20 @@ export class ToolHandlers {
   /**
    * Handle setup_colab_auth tool
    *
-   * Launches start-vnc.sh to start Xvfb / x11vnc / noVNC services and returns
-   * the noVNC URL the user can open to supervise or perform Google authentication.
+   * Launches start-vnc.sh to start Xvfb / x11vnc / noVNC services, then opens
+   * Chromium (non-headless so it appears in the VNC window) and navigates to the
+   * Google login page — same behaviour as setup_auth for NotebookLM.
+   *
+   * The noVNC URL is surfaced early via sendProgress so the user can connect
+   * before the browser appears.
+   *
+   * Because the Google auth state is shared (SID/SSID cookies work for both
+   * NotebookLM and Colab), logging in here is sufficient for the entire workflow.
    */
-  async handleSetupColabAuth(args: { novnc_host?: string }): Promise<ToolResult<VncSetupResult>> {
+  async handleSetupColabAuth(
+    args: { novnc_host?: string },
+    sendProgress?: ProgressCallback
+  ): Promise<ToolResult<VncSetupResult>> {
     const { novnc_host } = args;
     log.info('🔧 [TOOL] setup_colab_auth called');
 
@@ -3884,7 +3894,9 @@ export class ToolHandlers {
       const novncPort = parseInt(process.env.NOVNC_PORT ?? '6080', 10);
       const host = novnc_host ?? process.env.NOVNC_HOST ?? 'localhost';
 
-      // Locate start-vnc.sh relative to this module's package root
+      // ── Step 1: Start VNC services ─────────────────────────────────────────
+      await sendProgress?.('Starting VNC services...', 0, 10);
+
       const scriptPath = path.resolve(process.cwd(), 'scripts', 'start-vnc.sh');
 
       if (!fs.existsSync(scriptPath)) {
@@ -3936,15 +3948,42 @@ export class ToolHandlers {
       const novncUrl = `http://${host}:${novncPort}/vnc.html`;
       log.success(`✅ [TOOL] setup_colab_auth: VNC services started. noVNC URL: ${novncUrl}`);
 
+      // ── Step 2: Notify user with the noVNC URL before blocking on auth ─────
+      await sendProgress?.(
+        `noVNC lancé — ouvrez ${novncUrl} et complétez la connexion Google si nécessaire. ` +
+          `Je passe à l'allocation du runtime Colab (T4).`,
+        2,
+        10
+      );
+
+      // ── Step 3: Open browser + perform Google auth via existing AuthManager ─
+      // performSetup launches Chromium non-headless (visible in the VNC window),
+      // navigates to the Google / NotebookLM login page, and waits up to 10 min
+      // for the user to complete the OAuth flow.  The resulting cookies (SID,
+      // SSID, __Secure-1PSID …) are shared between NotebookLM and Colab.
+      log.info('🌐 [TOOL] setup_colab_auth: opening browser for Google authentication...');
+      const loginSuccess = await this.authManager.performSetup(sendProgress, true);
+
+      if (loginSuccess) {
+        log.success('✅ [TOOL] setup_colab_auth: Google authentication completed');
+      } else {
+        log.warning(
+          '⚠️ [TOOL] setup_colab_auth: browser closed without confirmed login — ' +
+            'VNC services remain active.'
+        );
+      }
+
       return {
         success: true,
         data: {
           novnc_url: novncUrl,
           vnc_port: vncPort,
           novnc_port: novncPort,
-          message:
-            `VNC services started. Open ${novncUrl} in your browser to supervise ` +
-            'or complete the Google authentication flow.',
+          authenticated: loginSuccess,
+          message: loginSuccess
+            ? `Authenticated successfully. VNC still accessible at ${novncUrl}.`
+            : `VNC started at ${novncUrl}. Authentication was not confirmed — ` +
+              `open the URL and log in, then call colab_health_check to verify.`,
         },
       };
     } catch (error) {

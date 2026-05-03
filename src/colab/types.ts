@@ -110,6 +110,7 @@ export interface VncSetupResult {
   novnc_url: string;
   vnc_port: number;
   novnc_port: number;
+  authenticated: boolean;
   message: string;
 }
 

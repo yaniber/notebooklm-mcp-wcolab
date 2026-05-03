@@ -623,7 +623,10 @@ class NotebookLMMCPServer {
 
           // ── Colab Workflow Tools ──────────────────────────────────────────
           case 'setup_colab_auth':
-            result = await this.toolHandlers.handleSetupColabAuth(args as { novnc_host?: string });
+            result = await this.toolHandlers.handleSetupColabAuth(
+              args as { novnc_host?: string },
+              sendProgress
+            );
             break;
 
           case 'manage_colab_runtime':

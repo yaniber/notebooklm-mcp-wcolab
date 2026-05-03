@@ -11,42 +11,105 @@ notebook executions through the `notebooklm-mcp-wcolab` server.
 │  VS Code Web / Codespaces    │        │  Docker Container           │
 │                              │  MCP   │                             │
 │  GitHub Copilot Agent  ──────┼───────▶│  notebooklm-mcp-wcolab      │
-│  (MCP client)                │        │  (HTTP / stdio server)      │
+│  (HTTP / stdio server)       │        │  (HTTP / stdio server)      │
 │                              │        │       │                     │
 └──────────────────────────────┘        │       │ WebSocket           │
                                         │       ▼                     │
                                         │  colab-mcp bridge           │
-                                        │  (ws://colab-host:8765)     │
-                                        │       │                     │
+                                        │  (COLAB_WS_URL)             │
                                         │       │                     │
                                         └───────┼─────────────────────┘
-                                                │ WebSocket
+                                                │ WebSocket (tunnel)
                                                 ▼
                                         ┌───────────────┐
                                         │  Google Colab │
                                         │  Runtime      │
+                                        │  (colab-mcp)  │
                                         └───────────────┘
 ```
 
 The four MCP tools introduced by this workflow are:
 
-| Tool                     | Purpose                                                |
-| ------------------------ | ------------------------------------------------------ |
-| `setup_colab_auth`       | Launch VNC/noVNC services and return a supervision URL |
-| `manage_colab_runtime`   | Allocate or release a GPU/TPU instance                 |
-| `execute_colab_notebook` | Open and run an existing `.ipynb` notebook             |
-| `sync_github_artifacts`  | Download Colab outputs to the agent workspace          |
+| Tool                     | Purpose                                                               |
+| ------------------------ | --------------------------------------------------------------------- |
+| `setup_colab_auth`       | Start VNC/noVNC **and** open the Google login page in Chromium        |
+| `manage_colab_runtime`   | Allocate or release a GPU/TPU instance                                |
+| `execute_colab_notebook` | Open and run an existing `.ipynb` notebook                            |
+| `sync_github_artifacts`  | Download Colab outputs to the agent workspace                         |
 
 ---
 
 ## Prerequisites
 
-| Requirement                    | Details                                 |
-| ------------------------------ | --------------------------------------- |
-| Docker (or Docker Compose)     | To run the MCP server container         |
-| `googlecolab/colab-mcp`        | WebSocket bridge installed inside Colab |
-| Colab Pro / Pro+ (recommended) | For GPU T4 / A100 quota                 |
-| VS Code with MCP extension     | Or any MCP-compatible client            |
+| Requirement                    | Details                                                        |
+| ------------------------------ | -------------------------------------------------------------- |
+| Docker (or Docker Compose)     | To run the MCP server container                                |
+| `googlecolab/colab-mcp`        | Python package installed & running **inside your Colab notebook** |
+| `COLAB_WS_URL`                 | Set to the tunnel URL exposed by colab-mcp (see Step 0 below) |
+| Colab Pro / Pro+ (recommended) | For GPU T4 / A100 quota                                        |
+| VS Code with MCP extension     | Or any MCP-compatible client                                   |
+
+---
+
+## Step 0 – Configure the colab-mcp WebSocket Bridge (CRITICAL)
+
+> **This step is mandatory.** The Colab bridge tools (`manage_colab_runtime`,
+> `execute_colab_notebook`, `sync_github_artifacts`) communicate with your Colab
+> runtime via a WebSocket server provided by `googlecolab/colab-mcp`. Without
+> this configuration, all bridge tool calls will fail with
+> **`ECONNREFUSED 127.0.0.1:8765`**.
+
+### 0a – Install and start colab-mcp in your Colab notebook
+
+Open your Colab notebook and add a cell at the top:
+
+```python
+# Install colab-mcp
+!pip install colab-mcp -q
+
+# Start the WebSocket server and print the public tunnel URL
+from colab_mcp import start_server
+tunnel_url = start_server()
+print(f"COLAB_WS_URL={tunnel_url}")
+```
+
+Run the cell. It prints a `ws://...` or `wss://...` URL — this is your
+`COLAB_WS_URL`.
+
+### 0b – Set COLAB_WS_URL in the MCP server
+
+**Important:** In GitHub Codespaces, `ws://localhost:8765` does **not** point to
+your Colab runtime. You must use the tunnel URL printed by colab-mcp.
+
+Set the environment variable in your `.env` file or Docker run command:
+
+```bash
+# .env
+COLAB_WS_URL=wss://<your-colab-mcp-tunnel>.trycloudflare.com
+```
+
+Or pass it at container start:
+
+```bash
+docker run -d \
+  --name notebooklm-mcp \
+  -p 3000:3000 \
+  -p 6080:6080 \
+  -e COLAB_WS_URL=wss://<your-tunnel>.trycloudflare.com \
+  -v notebooklm-data:/data \
+  notebooklm-mcp
+```
+
+Verify connectivity:
+
+```
+colab_health_check()
+# Should return: { "status": "ok", "connected": true, "gpu": "Tesla T4" }
+```
+
+> **Note:** The tunnel URL changes every time you restart the Colab notebook.
+> Update `COLAB_WS_URL` and restart the MCP server whenever you start a new
+> Colab session.
 
 ---
 
@@ -58,57 +121,58 @@ Build and start the container:
 docker compose up -d
 ```
 
-Or manually:
-
-```bash
-docker build -t notebooklm-mcp .
-
-docker run -d \
-  --name notebooklm-mcp \
-  -p 3000:3000 \
-  -p 6080:6080 \
-  -e COLAB_WS_URL=ws://<colab-tunnel-host>:8765 \
-  -v notebooklm-data:/data \
-  notebooklm-mcp
-```
-
 Key environment variables:
 
-| Variable        | Default               | Description                                |
-| --------------- | --------------------- | ------------------------------------------ |
-| `COLAB_WS_URL`  | `ws://localhost:8765` | Full WebSocket URL of the colab-mcp server |
-| `COLAB_WS_HOST` | `localhost`           | Host (used when `COLAB_WS_URL` is not set) |
-| `COLAB_WS_PORT` | `8765`                | Port (used when `COLAB_WS_URL` is not set) |
-| `NOVNC_PORT`    | `6080`                | noVNC web port (exposed on host)           |
-| `VNC_PORT`      | `5900`                | Raw VNC port (internal)                    |
-| `ENABLE_VNC`    | `true`                | Set to `false` to skip VNC startup         |
+| Variable        | Default               | Description                                     |
+| --------------- | --------------------- | ----------------------------------------------- |
+| `COLAB_WS_URL`  | `ws://localhost:8765` | **Full tunnel URL** of the colab-mcp WebSocket  |
+| `COLAB_WS_HOST` | `localhost`           | Host (used when `COLAB_WS_URL` is not set)      |
+| `COLAB_WS_PORT` | `8765`                | Port (used when `COLAB_WS_URL` is not set)      |
+| `NOVNC_PORT`    | `6080`                | noVNC web port (exposed on host)                |
+| `VNC_PORT`      | `5900`                | Raw VNC port (internal)                         |
+| `ENABLE_VNC`    | `true`                | Set to `false` to skip VNC startup at boot      |
 
 > **Note:** `ENABLE_VNC=true` is the default. The Docker entrypoint automatically
 > calls `scripts/start-vnc.sh` on container start. `setup_colab_auth` can also
-> (re-)start VNC on demand during the session.
+> (re-)start VNC on demand and will open the Google login browser automatically.
 
 ---
 
 ## Step 2 – First-Time Google Authentication (Supervised via noVNC)
 
-On first run—or after cookie expiry—Copilot must trigger an interactive Google
+On first run—or after cookie expiry—Copilot triggers an interactive Google
 login that the user completes through the browser.
 
 **Copilot prompt:**
 
-> "Connect to Google. Use the MCP tool `setup_colab_auth` to open the authentication
-> session and give me the noVNC link."
+> "Connect to Google. Use the MCP tool `setup_colab_auth` to open the
+> authentication session."
 
 **What happens internally:**
 
-1. Copilot calls `setup_colab_auth` (with an optional `novnc_host` if the
-   container is on a remote server).
+1. Copilot calls `setup_colab_auth`.
 2. The tool launches `scripts/start-vnc.sh` which starts:
    - `Xvfb` – virtual X11 display
    - `fluxbox` – lightweight window manager
    - `x11vnc` – VNC server on port `VNC_PORT` (default 5900)
    - `websockify` + noVNC – browser-accessible VNC on port `NOVNC_PORT` (default 6080)
-3. The tool returns:
+3. A **progress notification** is immediately sent with the noVNC URL so the
+   user can connect before the browser opens:
+
+   > `noVNC lancé — ouvrez http://localhost:6080/vnc.html et complétez la connexion Google…`
+
+   In GitHub Codespaces the forwarded URL is:
+   `https://<codespace-name>-6080.app.github.dev/vnc_auto.html`
+
+4. Chromium is launched **non-headless** (visible in the VNC window) and
+   navigates to the Google / NotebookLM login page — the same flow as `setup_auth`.
+5. The user opens the noVNC URL, sees the Chrome window with the Google login
+   page, and completes the OAuth flow.
+6. `setup_colab_auth` detects the successful login and saves browser state
+   (cookies) to `/data/browser_state/`. These Google cookies (SID, SSID,
+   `__Secure-1PSID` …) are shared between NotebookLM **and** Colab — a single
+   login covers both products.
+7. The tool returns:
 
 ```json
 {
@@ -117,26 +181,22 @@ login that the user completes through the browser.
     "novnc_url": "http://localhost:6080/vnc.html",
     "vnc_port": 5900,
     "novnc_port": 6080,
-    "message": "VNC services started. Open http://localhost:6080/vnc.html ..."
+    "authenticated": true,
+    "message": "Authenticated successfully. VNC still accessible at http://localhost:6080/vnc.html."
   }
 }
 ```
 
-4. The user opens `http://<host>:6080/vnc.html` in their browser.
-5. They see the Chromium window, complete the Google OAuth flow, and close the
-   noVNC tab once done.
-6. Browser state (cookies) is persisted in `/data/browser_state/` for future
-   sessions.
-
 **Error handling:** If `start-vnc.sh` exits with a non-zero code (e.g., `Xvfb`
-not found in a non-Docker environment), `setup_colab_auth` returns
+not found outside Docker), `setup_colab_auth` returns
 `{ success: false, error: "VNC script exited with code 1: ..." }`.
 
 ---
 
 ## Step 3 – Execute a Colab Notebook
 
-Once authenticated, the user can ask Copilot to run a notebook:
+Once authenticated (and `COLAB_WS_URL` configured), the user can ask Copilot
+to run a notebook:
 
 **User prompt:**
 
@@ -146,12 +206,11 @@ Once authenticated, the user can ask Copilot to run a notebook:
 
 ---
 
-## Step 4 – Allocate a GPU Instance
+## Step 4 – Allocate a GPU Instance and Execute the Notebook
 
-Before executing the notebook, Copilot allocates an appropriate runtime:
+Before executing the notebook, Copilot allocates a runtime:
 
 ```typescript
-// Tool call made by the agent
 manage_colab_runtime({
   action: 'allocate',
   instance_type: 'T4', // or "A100", "TPU", "CPU"
@@ -174,9 +233,8 @@ manage_colab_runtime({
 ```
 
 **Error handling:** If no T4 quota is available, the bridge returns
-`success: false` with an error message such as `"No GPU quota available"`.
-The agent should surface this error to the user and optionally retry with
-`instance_type: "CPU"`.
+`success: false` with `"No GPU quota available"`. The agent should surface this
+error and optionally retry with `instance_type: "CPU"`.
 
 Then Copilot executes the notebook asynchronously:
 
@@ -202,8 +260,8 @@ execute_colab_notebook({
 }
 ```
 
-The agent may poll the status using `colab_get_session_status` or
-`colab_execute_python` with a status-checking snippet.
+Poll for completion using `colab_get_session_status` or a Python snippet via
+`colab_execute_python`.
 
 ---
 
@@ -211,7 +269,8 @@ The agent may poll the status using `colab_get_session_status` or
 
 While the notebook is running, the user can watch Colab in real time:
 
-1. Open `http://<host>:6080/vnc.html` (the URL returned in Step 2).
+1. Open the forwarded noVNC URL in Codespaces:
+   `https://<codespace-name>-6080.app.github.dev/vnc_auto.html`
 2. The Chromium window shows the running Colab notebook with live cell outputs.
 3. The user can interact (scroll, click) if manual intervention is needed.
 
@@ -221,8 +280,8 @@ No agent action is required for this step.
 
 ## Step 6 – Sync Artifacts and Release the Runtime
 
-Once execution completes, Copilot syncs the outputs back to the VS Code
-workspace and releases the runtime to stop Colab credit consumption.
+Once execution completes, Copilot syncs outputs back to the VS Code workspace
+and releases the runtime to stop Colab credit consumption.
 
 ### 6a – Sync outputs
 
@@ -239,7 +298,10 @@ sync_github_artifacts({
 {
   "success": true,
   "data": {
-    "files_synced": ["/workspace/artifacts/output.csv", "/workspace/artifacts/converted_model.pkl"],
+    "files_synced": [
+      "/workspace/artifacts/output.csv",
+      "/workspace/artifacts/converted_model.pkl"
+    ],
     "workspace_path": "/workspace/artifacts",
     "total_bytes": 204800,
     "message": "Successfully synced 2 file(s) to /workspace/artifacts"
@@ -257,8 +319,7 @@ manage_colab_runtime({ action: 'delete' });
 ```
 
 This permanently destroys the Colab runtime, stopping credit usage immediately.
-Use `action: "stop"` instead if you want to keep the runtime alive but
-disconnect from it.
+Use `action: "stop"` instead to keep the runtime alive but disconnect from it.
 
 ---
 
@@ -270,10 +331,10 @@ User            Copilot Agent        MCP Server           Colab Runtime
  │ "auth setup"      │                    │                     │
  │──────────────────▶│ setup_colab_auth() │                     │
  │                   │───────────────────▶│ spawn start-vnc.sh  │
- │◀──────────────────│ novnc_url          │                     │
- │                   │                    │                     │
- │ [opens noVNC,     │                    │                     │
+ │◀── progress ──────│ novnc_url (early)  │ open Chromium       │
+ │ [opens noVNC,     │                    │ → Google login      │
  │  completes login] │                    │                     │
+ │                   │◀───────────────────│ authenticated:true  │
  │                   │                    │                     │
  │ "run notebook"    │                    │                     │
  │──────────────────▶│ manage_colab_      │                     │
@@ -303,14 +364,16 @@ User            Copilot Agent        MCP Server           Colab Runtime
 
 ### `setup_colab_auth`
 
-Launches `scripts/start-vnc.sh` and returns a noVNC URL for supervised
-browser access.
+Starts VNC services **and** opens Chromium with the Google login page (visible
+in the VNC window). Waits up to 10 minutes for the user to complete the OAuth
+flow, then saves the auth state.
 
 | Parameter    | Type   | Required | Description                                             |
 | ------------ | ------ | -------- | ------------------------------------------------------- |
 | `novnc_host` | string | No       | Hostname/IP for the returned URL (default: `localhost`) |
 
-**Returns:** `VncSetupResult` – `novnc_url`, `vnc_port`, `novnc_port`, `message`
+**Returns:** `VncSetupResult` – `novnc_url`, `vnc_port`, `novnc_port`,
+`authenticated`, `message`
 
 ---
 
@@ -324,7 +387,8 @@ Allocates or releases a Colab GPU/TPU instance via the WebSocket bridge.
 | `instance_type` | `"T4" \| "A100" \| "TPU" \| "CPU"` | No       | Hardware type (allocate only, default: `T4`) |
 | `timeout_ms`    | number                             | No       | Request timeout in ms (default: 30 000)      |
 
-**Returns:** `RuntimeManageResult` – `action`, `instance_type`, `status`, `runtime_id`, `message`
+**Returns:** `RuntimeManageResult` – `action`, `instance_type`, `status`,
+`runtime_id`, `message`
 
 **Error cases:**
 
@@ -343,7 +407,8 @@ Opens and executes an existing `.ipynb` notebook in the active Colab runtime.
 | `async_execution` | boolean | No       | Run asynchronously (default: `true`)          |
 | `timeout_ms`      | number  | No       | Execution timeout in ms (default: 30 000)     |
 
-**Returns:** `NotebookExecuteResult` – `notebook_path`, `execution_id`, `status`, `async_execution`, `message`
+**Returns:** `NotebookExecuteResult` – `notebook_path`, `execution_id`,
+`status`, `async_execution`, `message`
 
 **Error cases:**
 
@@ -361,7 +426,8 @@ Downloads files from the Colab runtime and writes them to the local workspace.
 | `colab_paths`    | string[] | **Yes**  | Absolute paths inside the Colab runtime                  |
 | `workspace_path` | string   | No       | Local directory to save files (default: `process.cwd()`) |
 
-**Returns:** `ArtifactSyncResult` – `files_synced`, `workspace_path`, `total_bytes`, `message`
+**Returns:** `ArtifactSyncResult` – `files_synced`, `workspace_path`,
+`total_bytes`, `message`
 
 **Error cases:**
 
@@ -371,6 +437,32 @@ Downloads files from the Colab runtime and writes them to the local workspace.
 ---
 
 ## Troubleshooting
+
+### `ECONNREFUSED 127.0.0.1:8765` on any bridge tool
+
+This is the most common error. It means the MCP server cannot reach the
+colab-mcp WebSocket server.
+
+**Cause:** `COLAB_WS_URL` is not set (or still at its default `ws://localhost:8765`),
+and no colab-mcp server is running at that address.
+
+**Fix:**
+1. In your Colab notebook, run:
+   ```python
+   from colab_mcp import start_server
+   print(start_server())
+   ```
+2. Copy the printed `wss://...` URL.
+3. Set `COLAB_WS_URL=wss://<url>` in your `.env` and restart the MCP server.
+4. Confirm with `colab_health_check()` → `{ "connected": true }`.
+
+### `setup_colab_auth` shows an empty VNC desktop (no browser window)
+
+This should no longer happen with the current version. If it does:
+- Ensure the container image was rebuilt after the latest update.
+- Check that `DISPLAY=:99` is set and VNC services are running (`ps aux | grep Xvfb`).
+- Alternatively, call `setup_auth` (the NotebookLM auth tool) — it opens the same
+  browser and saves the same Google cookies, which are reused by all Colab tools.
 
 ### VNC services fail to start
 
@@ -396,11 +488,14 @@ Downloads files from the Colab runtime and writes them to the local workspace.
 - Use `colab_execute_python({ code: "import os; print(os.listdir('/content'))" })`
   to inspect available files before syncing.
 
-### Bridge not connected
+### Tunnel URL expired
 
-- Confirm `COLAB_WS_URL` is set and the colab-mcp WebSocket server is running
-  inside your Colab session.
-- Call `colab_health_check` to verify connectivity before other bridge tools.
+The colab-mcp tunnel URL is ephemeral. Each time you reconnect or restart the
+Colab runtime you must:
+1. Re-run the `start_server()` cell.
+2. Update `COLAB_WS_URL` with the new URL.
+3. Restart the MCP server (or update the ENV variable without restart if your
+   deployment supports live config reloads).
 
 ---
 
