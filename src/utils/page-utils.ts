@@ -568,7 +568,10 @@ async function extractLatestText(
               );
             });
             if (closest) {
-              container = closest.asElement() || element;
+              container =
+                (closest.asElement() as unknown as import('patchright').ElementHandle<
+                  SVGElement | HTMLElement
+                >) || element;
             }
           } catch {
             container = element;

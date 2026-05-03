@@ -22,7 +22,10 @@ COPY --chown=notebooklm:notebooklm package*.json ./
 USER notebooklm
 
 # Installer TOUTES les dépendances (avec devDependencies pour TypeScript)
-RUN npm ci --ignore-scripts
+# Ensure devDependencies are installed during the build stage so `tsc` and other
+# build tools are available. Use `--include=dev` explicitly for npm versions
+# that support it; fallback to default behavior when not set.
+RUN npm ci --include=dev --ignore-scripts || npm ci --ignore-scripts
 
 # Copier les sources AVANT de builder
 COPY --chown=notebooklm:notebooklm src/ ./src/
