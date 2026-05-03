@@ -17,6 +17,8 @@
 
 import fs from 'fs';
 import path from 'path';
+import { spawn } from 'child_process';
+import { z } from 'zod';
 import { ColabBridgeClient } from '../colab/colab-bridge.js';
 import type {
   ExecuteResult,
@@ -27,6 +29,11 @@ import type {
   DownloadResult,
   ColabSessionStatus,
   ColabHealthStatus,
+  ColabRuntimeAction,
+  ColabInstanceType,
+  RuntimeManageResult,
+  NotebookExecuteResult,
+  ArtifactSyncResult,
 } from '../colab/types.js';
 import { SessionManager } from '../session/session-manager.js';
 import { AuthManager } from '../auth/auth-manager.js';
@@ -1140,6 +1147,94 @@ User: "Yes" → call remove_notebook`,
 
     // ── Colab Bridge Tools ──────────────────────────────────────────────────
     {
+      name: 'setup_colab_auth',
+      description:
+        'Start VNC/noVNC services and open a visible browser for Google authentication.\n\n' +
+        'This enables supervised login for Colab and NotebookLM using the shared Chrome profile.\n' +
+        'Returns a noVNC URL so the user can complete the login flow.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          novnc_host: {
+            type: 'string',
+            description:
+              'Optional hostname to use when returning the noVNC URL (default: localhost).',
+          },
+        },
+      },
+    },
+    {
+      name: 'manage_colab_runtime',
+      description:
+        'Allocate, stop, or delete a Google Colab runtime via the colab-mcp bridge.\n\n' +
+        'Use action=allocate to request a specific hardware type (T4, A100, TPU, CPU).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: {
+            type: 'string',
+            enum: ['allocate', 'stop', 'delete'],
+            description: 'Runtime lifecycle action.',
+          },
+          instance_type: {
+            type: 'string',
+            enum: ['T4', 'A100', 'TPU', 'CPU'],
+            description: 'Hardware type for allocation (default: T4).',
+          },
+          timeout_ms: {
+            type: 'number',
+            description: 'Request timeout in milliseconds (default: 30000).',
+          },
+        },
+        required: ['action'],
+      },
+    },
+    {
+      name: 'execute_colab_notebook',
+      description:
+        'Open and execute an existing .ipynb notebook in the active Colab runtime.\n\n' +
+        'Use async_execution=true to run in the background and poll status later.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          notebook_path: {
+            type: 'string',
+            description: 'Path to the notebook inside the Colab runtime.',
+          },
+          async_execution: {
+            type: 'boolean',
+            description: 'Run asynchronously (default: true).',
+          },
+          timeout_ms: {
+            type: 'number',
+            description: 'Execution timeout in milliseconds (default: 30000).',
+          },
+        },
+        required: ['notebook_path'],
+      },
+    },
+    {
+      name: 'sync_github_artifacts',
+      description:
+        'Download files from the Colab runtime and write them into the local workspace.\n\n' +
+        'Each file is written using its basename into workspace_path (default: process.cwd()).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          colab_paths: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Absolute paths inside the Colab runtime (e.g. /content/output.csv).',
+          },
+          workspace_path: {
+            type: 'string',
+            description: 'Local directory to save files (default: process.cwd()).',
+          },
+        },
+        required: ['colab_paths'],
+      },
+    },
+    {
       name: 'colab_execute_python',
       description:
         'Execute Python code in a running Google Colab runtime via colab-mcp WebSocket bridge.\n\n' +
@@ -1261,6 +1356,36 @@ User: "Yes" → call remove_notebook`,
       },
     },
   ];
+}
+
+const setupColabAuthSchema = z.object({
+  novnc_host: z.string().trim().min(1).optional(),
+});
+
+const manageColabRuntimeSchema = z.object({
+  action: z.enum(['allocate', 'stop', 'delete']),
+  instance_type: z.enum(['T4', 'A100', 'TPU', 'CPU']).optional(),
+  timeout_ms: z.number().int().positive().optional(),
+});
+
+const executeColabNotebookSchema = z.object({
+  notebook_path: z.string().trim().min(1),
+  async_execution: z.boolean().optional(),
+  timeout_ms: z.number().int().positive().optional(),
+});
+
+const syncGithubArtifactsSchema = z.object({
+  colab_paths: z.array(z.string().trim().min(1)).min(1),
+  workspace_path: z.string().trim().min(1).optional(),
+});
+
+function formatZodError(error: z.ZodError): string {
+  return error.errors
+    .map((err) => {
+      const pathLabel = err.path.length > 0 ? err.path.join('.') : 'input';
+      return `${pathLabel}: ${err.message}`;
+    })
+    .join('; ');
 }
 
 /**
@@ -3588,6 +3713,242 @@ export class ToolHandlers {
       await client.connect();
     }
     return client;
+  }
+
+  private async startVncServices(): Promise<void> {
+    const scriptPath = path.resolve('scripts/start-vnc.sh');
+    if (!fs.existsSync(scriptPath)) {
+      throw new Error(`VNC script not found at ${scriptPath}`);
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn('bash', [scriptPath], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env },
+      });
+
+      let stderr = '';
+      let stdout = '';
+
+      child.stdout?.on('data', (chunk) => {
+        stdout += chunk.toString();
+      });
+
+      child.stderr?.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+
+      child.on('error', (error) => {
+        reject(error);
+      });
+
+      child.on('close', (code) => {
+        if (code !== 0) {
+          reject(
+            new Error(`VNC script exited with code ${code}: ${stderr.trim() || stdout.trim()}`)
+          );
+          return;
+        }
+        resolve();
+      });
+    });
+  }
+
+  /**
+   * Handle setup_colab_auth tool
+   */
+  async handleSetupColabAuth(
+    args: {
+      novnc_host?: string;
+    },
+    sendProgress?: ProgressCallback
+  ): Promise<
+    ToolResult<{
+      novnc_url: string;
+      vnc_port: number;
+      novnc_port: number;
+      authenticated: boolean;
+      message: string;
+    }>
+  > {
+    const parsed = setupColabAuthSchema.safeParse(args);
+    if (!parsed.success) {
+      return {
+        success: false,
+        error: formatZodError(parsed.error),
+      };
+    }
+
+    const novncHost = parsed.data.novnc_host ?? 'localhost';
+    const vncPort = parseInt(process.env.VNC_PORT ?? '5900', 10);
+    const novncPort = parseInt(process.env.NOVNC_PORT ?? '6080', 10);
+    const novncUrl = `http://${novncHost}:${novncPort}/vnc.html`;
+
+    await sendProgress?.('Starting VNC services...', 1, 4);
+
+    try {
+      await this.startVncServices();
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] setup_colab_auth failed: ${errorMessage}`);
+      return { success: false, error: errorMessage };
+    }
+
+    await sendProgress?.(`noVNC ready: ${novncUrl}`, 2, 4);
+    await sendProgress?.('Opening browser for Google login...', 3, 4);
+
+    try {
+      const authenticated = await this.authManager.performSetup(sendProgress, true);
+      if (!authenticated) {
+        return {
+          success: false,
+          error: 'Authentication failed or was cancelled',
+        };
+      }
+
+      await sendProgress?.('Authentication completed.', 4, 4);
+      return {
+        success: true,
+        data: {
+          novnc_url: novncUrl,
+          vnc_port: vncPort,
+          novnc_port: novncPort,
+          authenticated: true,
+          message: `Authenticated successfully. VNC still accessible at ${novncUrl}.`,
+        },
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] setup_colab_auth failed: ${errorMessage}`);
+      return {
+        success: false,
+        error: errorMessage,
+      };
+    }
+  }
+
+  /**
+   * Handle manage_colab_runtime tool
+   */
+  async handleManageColabRuntime(args: {
+    action: ColabRuntimeAction;
+    instance_type?: ColabInstanceType;
+    timeout_ms?: number;
+  }): Promise<ToolResult<RuntimeManageResult>> {
+    const parsed = manageColabRuntimeSchema.safeParse(args);
+    if (!parsed.success) {
+      return {
+        success: false,
+        error: formatZodError(parsed.error),
+      };
+    }
+
+    const { action, instance_type, timeout_ms } = parsed.data;
+    const instanceType = action === 'allocate' ? instance_type ?? 'T4' : undefined;
+
+    log.info(`🔧 [TOOL] manage_colab_runtime called: ${action}`);
+
+    try {
+      const client = await this.getColabClient();
+      const result = await client.manageRuntime(action, instanceType, timeout_ms);
+      log.success(`✅ [TOOL] manage_colab_runtime completed: ${result.status}`);
+      return { success: true, data: result };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] manage_colab_runtime failed: ${errorMessage}`);
+      return { success: false, error: errorMessage };
+    }
+  }
+
+  /**
+   * Handle execute_colab_notebook tool
+   */
+  async handleExecuteColabNotebook(args: {
+    notebook_path: string;
+    async_execution?: boolean;
+    timeout_ms?: number;
+  }): Promise<ToolResult<NotebookExecuteResult>> {
+    const parsed = executeColabNotebookSchema.safeParse(args);
+    if (!parsed.success) {
+      return {
+        success: false,
+        error: formatZodError(parsed.error),
+      };
+    }
+
+    const { notebook_path, async_execution, timeout_ms } = parsed.data;
+    const asyncExecution = async_execution ?? true;
+
+    log.info(`🔧 [TOOL] execute_colab_notebook called: ${notebook_path}`);
+
+    try {
+      const client = await this.getColabClient();
+      const result = await client.executeNotebook(notebook_path, asyncExecution, timeout_ms);
+      log.success(`✅ [TOOL] execute_colab_notebook completed: ${result.status}`);
+      return { success: true, data: result };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] execute_colab_notebook failed: ${errorMessage}`);
+      return { success: false, error: errorMessage };
+    }
+  }
+
+  /**
+   * Handle sync_github_artifacts tool
+   */
+  async handleSyncGithubArtifacts(args: {
+    colab_paths: string[];
+    workspace_path?: string;
+  }): Promise<ToolResult<ArtifactSyncResult>> {
+    const parsed = syncGithubArtifactsSchema.safeParse(args);
+    if (!parsed.success) {
+      return {
+        success: false,
+        error: formatZodError(parsed.error),
+      };
+    }
+
+    const { colab_paths, workspace_path } = parsed.data;
+    const workspacePath = path.resolve(workspace_path ?? process.cwd());
+
+    log.info(`🔧 [TOOL] sync_github_artifacts called (${colab_paths.length} file(s))`);
+
+    try {
+      fs.mkdirSync(workspacePath, { recursive: true });
+
+      const client = await this.getColabClient();
+      const filesSynced: string[] = [];
+      let totalBytes = 0;
+
+      for (const colabPath of colab_paths) {
+        if (!colabPath.startsWith('/')) {
+          throw new Error(`colab_paths must be absolute: ${colabPath}`);
+        }
+        const result = await client.downloadFile(colabPath);
+        const content = Buffer.from(result.content_base64, 'base64');
+        const destination = path.join(workspacePath, path.basename(colabPath));
+        fs.writeFileSync(destination, content);
+        totalBytes += content.length;
+        filesSynced.push(destination);
+      }
+
+      const message = `Successfully synced ${filesSynced.length} file(s) to ${workspacePath}`;
+      log.success(`✅ [TOOL] sync_github_artifacts completed: ${message}`);
+
+      return {
+        success: true,
+        data: {
+          files_synced: filesSynced,
+          workspace_path: workspacePath,
+          total_bytes: totalBytes,
+          message,
+        },
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] sync_github_artifacts failed: ${errorMessage}`);
+      return { success: false, error: errorMessage };
+    }
   }
 
   /**

@@ -28,7 +28,9 @@ export type ColabAction =
   | 'upload_file'
   | 'download_file'
   | 'health_check'
-  | 'get_session_status';
+  | 'get_session_status'
+  | 'manage_runtime'
+  | 'execute_notebook';
 
 // ─── Individual result shapes ─────────────────────────────────────────────────
 
@@ -100,4 +102,36 @@ export interface ColabHealthStatus {
   ram_total_gb?: number;
   ram_used_gb?: number;
   message?: string;
+}
+
+// ─── Runtime lifecycle / notebook execution ────────────────────────────────
+
+export type ColabRuntimeAction = 'allocate' | 'stop' | 'delete';
+
+export type ColabInstanceType = 'T4' | 'A100' | 'TPU' | 'CPU';
+
+/** Returned by manage_runtime */
+export interface RuntimeManageResult {
+  action: ColabRuntimeAction;
+  instance_type?: ColabInstanceType;
+  status: 'success' | 'error';
+  runtime_id?: string;
+  message?: string;
+}
+
+/** Returned by execute_notebook */
+export interface NotebookExecuteResult {
+  notebook_path: string;
+  execution_id: string;
+  status: 'started' | 'completed' | 'failed';
+  async_execution: boolean;
+  message?: string;
+}
+
+/** Returned by sync_github_artifacts tool */
+export interface ArtifactSyncResult {
+  files_synced: string[];
+  workspace_path: string;
+  total_bytes: number;
+  message: string;
 }

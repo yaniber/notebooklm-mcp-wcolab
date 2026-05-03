@@ -583,6 +583,39 @@ class NotebookLMMCPServer {
             break;
 
           // ── Colab Bridge Tools ────────────────────────────────────────────
+          case 'setup_colab_auth':
+            result = await this.toolHandlers.handleSetupColabAuth(
+              args as { novnc_host?: string },
+              sendProgress
+            );
+            break;
+
+          case 'manage_colab_runtime':
+            result = await this.toolHandlers.handleManageColabRuntime(
+              args as {
+                action: 'allocate' | 'stop' | 'delete';
+                instance_type?: 'T4' | 'A100' | 'TPU' | 'CPU';
+                timeout_ms?: number;
+              }
+            );
+            break;
+
+          case 'execute_colab_notebook':
+            result = await this.toolHandlers.handleExecuteColabNotebook(
+              args as {
+                notebook_path: string;
+                async_execution?: boolean;
+                timeout_ms?: number;
+              }
+            );
+            break;
+
+          case 'sync_github_artifacts':
+            result = await this.toolHandlers.handleSyncGithubArtifacts(
+              args as { colab_paths: string[]; workspace_path?: string }
+            );
+            break;
+
           case 'colab_execute_python':
             result = await this.toolHandlers.handleColabExecutePython(
               args as { code: string; timeout_ms?: number }

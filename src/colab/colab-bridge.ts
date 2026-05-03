@@ -31,6 +31,10 @@ import type {
   DownloadResult,
   ColabSessionStatus,
   ColabHealthStatus,
+  ColabRuntimeAction,
+  ColabInstanceType,
+  RuntimeManageResult,
+  NotebookExecuteResult,
 } from './types.js';
 
 // ─── Configuration ────────────────────────────────────────────────────────────
@@ -292,5 +296,43 @@ export class ColabBridgeClient {
       throw new Error(response.error ?? 'health_check failed');
     }
     return response.result as ColabHealthStatus;
+  }
+
+  /**
+   * Allocate, stop, or delete a Colab runtime instance.
+   */
+  async manageRuntime(
+    action: ColabRuntimeAction,
+    instanceType?: ColabInstanceType,
+    timeoutMs?: number
+  ): Promise<RuntimeManageResult> {
+    const response = await this.send(
+      'manage_runtime',
+      { action, instance_type: instanceType },
+      timeoutMs
+    );
+    if (!response.success) {
+      throw new Error(response.error ?? 'manage_runtime failed');
+    }
+    return response.result as RuntimeManageResult;
+  }
+
+  /**
+   * Execute a .ipynb notebook in the active Colab runtime.
+   */
+  async executeNotebook(
+    notebookPath: string,
+    asyncExecution = true,
+    timeoutMs?: number
+  ): Promise<NotebookExecuteResult> {
+    const response = await this.send(
+      'execute_notebook',
+      { notebook_path: notebookPath, async_execution: asyncExecution },
+      timeoutMs
+    );
+    if (!response.success) {
+      throw new Error(response.error ?? 'execute_notebook failed');
+    }
+    return response.result as NotebookExecuteResult;
   }
 }
