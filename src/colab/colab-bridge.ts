@@ -31,6 +31,9 @@ import type {
   DownloadResult,
   ColabSessionStatus,
   ColabHealthStatus,
+  RuntimeManageResult,
+  NotebookExecuteResult,
+  ArtifactSyncResult,
 } from './types.js';
 
 // ─── Configuration ────────────────────────────────────────────────────────────
@@ -292,5 +295,68 @@ export class ColabBridgeClient {
       throw new Error(response.error ?? 'health_check failed');
     }
     return response.result as ColabHealthStatus;
+  }
+
+  /**
+   * Allocate, stop, or delete a Colab runtime instance.
+   *
+   * @param action       'allocate' to request a new GPU/TPU, 'stop'/'delete' to release it
+   * @param instanceType GPU/TPU type for allocation, e.g. 'T4', 'A100', 'TPU' (default: 'T4')
+   * @param timeout      Optional timeout in milliseconds
+   */
+  async manageRuntime(
+    action: 'allocate' | 'stop' | 'delete',
+    instanceType?: string,
+    timeout?: number
+  ): Promise<RuntimeManageResult> {
+    const params: Record<string, unknown> = { action };
+    if (instanceType) {
+      params.instance_type = instanceType;
+    }
+    const response = await this.send('manage_runtime', params, timeout);
+    if (!response.success) {
+      throw new Error(response.error ?? 'manage_runtime failed');
+    }
+    return response.result as RuntimeManageResult;
+  }
+
+  /**
+   * Open and execute an existing Colab notebook.
+   *
+   * @param notebookPath   Path to the .ipynb file inside the Colab runtime
+   * @param asyncExecution Run the notebook asynchronously (default: true)
+   * @param timeout        Optional timeout in milliseconds
+   */
+  async executeNotebook(
+    notebookPath: string,
+    asyncExecution = true,
+    timeout?: number
+  ): Promise<NotebookExecuteResult> {
+    const response = await this.send(
+      'execute_notebook',
+      { notebook_path: notebookPath, async: asyncExecution },
+      timeout
+    );
+    if (!response.success) {
+      throw new Error(response.error ?? 'execute_notebook failed');
+    }
+    return response.result as NotebookExecuteResult;
+  }
+
+  /**
+   * Sync artifact files from the Colab runtime to a local workspace path.
+   *
+   * @param colabPaths    List of file paths inside the Colab runtime to download
+   * @param workspacePath Local directory where downloaded files will be saved
+   */
+  async syncArtifacts(colabPaths: string[], workspacePath: string): Promise<ArtifactSyncResult> {
+    const response = await this.send('sync_artifacts', {
+      colab_paths: colabPaths,
+      workspace_path: workspacePath,
+    });
+    if (!response.success) {
+      throw new Error(response.error ?? 'sync_artifacts failed');
+    }
+    return response.result as ArtifactSyncResult;
   }
 }

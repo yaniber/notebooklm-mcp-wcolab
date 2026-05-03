@@ -590,9 +590,7 @@ class NotebookLMMCPServer {
             break;
 
           case 'colab_install_package':
-            result = await this.toolHandlers.handleColabInstallPackage(
-              args as { package: string }
-            );
+            result = await this.toolHandlers.handleColabInstallPackage(args as { package: string });
             break;
 
           case 'colab_list_variables':
@@ -600,9 +598,7 @@ class NotebookLMMCPServer {
             break;
 
           case 'colab_get_output':
-            result = await this.toolHandlers.handleColabGetOutput(
-              args as { cell_id: string }
-            );
+            result = await this.toolHandlers.handleColabGetOutput(args as { cell_id: string });
             break;
 
           case 'colab_upload_file':
@@ -623,6 +619,37 @@ class NotebookLMMCPServer {
 
           case 'colab_health_check':
             result = await this.toolHandlers.handleColabHealthCheck();
+            break;
+
+          // ── Colab Workflow Tools ──────────────────────────────────────────
+          case 'setup_colab_auth':
+            result = await this.toolHandlers.handleSetupColabAuth(args as { novnc_host?: string });
+            break;
+
+          case 'manage_colab_runtime':
+            result = await this.toolHandlers.handleManageColabRuntime(
+              args as {
+                action: 'allocate' | 'stop' | 'delete';
+                instance_type?: string;
+                timeout_ms?: number;
+              }
+            );
+            break;
+
+          case 'execute_colab_notebook':
+            result = await this.toolHandlers.handleExecuteColabNotebook(
+              args as {
+                notebook_path: string;
+                async_execution?: boolean;
+                timeout_ms?: number;
+              }
+            );
+            break;
+
+          case 'sync_github_artifacts':
+            result = await this.toolHandlers.handleSyncGithubArtifacts(
+              args as { colab_paths: string[]; workspace_path?: string }
+            );
             break;
 
           default:

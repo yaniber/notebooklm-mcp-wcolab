@@ -28,7 +28,10 @@ export type ColabAction =
   | 'upload_file'
   | 'download_file'
   | 'health_check'
-  | 'get_session_status';
+  | 'get_session_status'
+  | 'manage_runtime'
+  | 'execute_notebook'
+  | 'sync_artifacts';
 
 // ─── Individual result shapes ─────────────────────────────────────────────────
 
@@ -100,4 +103,38 @@ export interface ColabHealthStatus {
   ram_total_gb?: number;
   ram_used_gb?: number;
   message?: string;
+}
+
+/** Returned by setup_colab_auth (local VNC launch, not via WebSocket) */
+export interface VncSetupResult {
+  novnc_url: string;
+  vnc_port: number;
+  novnc_port: number;
+  message: string;
+}
+
+/** Returned by manage_runtime */
+export interface RuntimeManageResult {
+  action: 'allocate' | 'stop' | 'delete';
+  instance_type?: string;
+  status: 'success' | 'pending';
+  runtime_id?: string;
+  message: string;
+}
+
+/** Returned by execute_notebook */
+export interface NotebookExecuteResult {
+  notebook_path: string;
+  execution_id: string;
+  status: 'started' | 'completed' | 'error';
+  async_execution: boolean;
+  message: string;
+}
+
+/** Returned by sync_artifacts */
+export interface ArtifactSyncResult {
+  files_synced: string[];
+  workspace_path: string;
+  total_bytes: number;
+  message: string;
 }

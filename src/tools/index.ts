@@ -17,6 +17,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { spawn } from 'child_process';
 import { ColabBridgeClient } from '../colab/colab-bridge.js';
 import type {
   ExecuteResult,
@@ -27,6 +28,10 @@ import type {
   DownloadResult,
   ColabSessionStatus,
   ColabHealthStatus,
+  VncSetupResult,
+  RuntimeManageResult,
+  NotebookExecuteResult,
+  ArtifactSyncResult,
 } from '../colab/types.js';
 import { SessionManager } from '../session/session-manager.js';
 import { AuthManager } from '../auth/auth-manager.js';
@@ -1258,6 +1263,123 @@ User: "Yes" → call remove_notebook`,
       inputSchema: {
         type: 'object',
         properties: {},
+      },
+    },
+
+    // ── Colab Workflow Tools ────────────────────────────────────────────────
+    {
+      name: 'setup_colab_auth',
+      description:
+        'Launch VNC services (Xvfb + x11vnc + noVNC) so a human can supervise or perform\n' +
+        'the first Google authentication inside the container browser.\n\n' +
+        'Returns a noVNC URL the user can open in any browser to see and interact with\n' +
+        'the running Chromium session.\n\n' +
+        'Use cases:\n' +
+        '- First-time Google / Colab OAuth login that requires human interaction\n' +
+        '- Debugging a stuck Colab session via live desktop view\n\n' +
+        'Tip: After authenticating, call colab_health_check to verify the connection.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          novnc_host: {
+            type: 'string',
+            description:
+              'Hostname or IP for the noVNC URL returned to the user (default: localhost). ' +
+              'Set to the public host/IP when running inside Docker or a remote VM.',
+          },
+        },
+      },
+    },
+    {
+      name: 'manage_colab_runtime',
+      description:
+        'Allocate or release a Google Colab GPU/TPU runtime instance via the colab-mcp bridge.\n\n' +
+        'Actions:\n' +
+        '- allocate: Request a new runtime of the given instance_type (default: T4)\n' +
+        '- stop:     Disconnect from the runtime but keep it alive\n' +
+        '- delete:   Permanently destroy the runtime to stop credit consumption\n\n' +
+        'Use cases:\n' +
+        '- Request a T4 GPU before running a heavy notebook\n' +
+        '- Release the runtime after sync_github_artifacts to save Colab credits\n\n' +
+        'Error handling: throws if allocation fails (e.g. no GPU quota available).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: {
+            type: 'string',
+            enum: ['allocate', 'stop', 'delete'],
+            description: 'Runtime lifecycle action.',
+          },
+          instance_type: {
+            type: 'string',
+            enum: ['T4', 'A100', 'TPU', 'CPU'],
+            description: 'GPU/TPU hardware type (only relevant for allocate, default: T4).',
+          },
+          timeout_ms: {
+            type: 'number',
+            description: 'Request timeout in milliseconds (default: 30000).',
+          },
+        },
+        required: ['action'],
+      },
+    },
+    {
+      name: 'execute_colab_notebook',
+      description:
+        'Open and execute an existing Colab notebook via the colab-mcp WebSocket bridge.\n\n' +
+        'Supports asynchronous execution so the agent can continue other work while Colab runs.\n\n' +
+        'Example:\n' +
+        '  execute_colab_notebook({ notebook_path: "ColabNotebooks/Colab_Conversion_Only.ipynb" })\n\n' +
+        'Returns an execution_id and initial status. For long-running notebooks use\n' +
+        'colab_get_session_status or colab_execute_python to poll for completion.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          notebook_path: {
+            type: 'string',
+            description:
+              'Path to the .ipynb notebook inside the Colab runtime, ' +
+              'e.g. "ColabNotebooks/Colab_Conversion_Only.ipynb".',
+          },
+          async_execution: {
+            type: 'boolean',
+            description: 'Run the notebook asynchronously (default: true).',
+          },
+          timeout_ms: {
+            type: 'number',
+            description: 'Execution timeout in milliseconds (default: 30000).',
+          },
+        },
+        required: ['notebook_path'],
+      },
+    },
+    {
+      name: 'sync_github_artifacts',
+      description:
+        'Download output files from the Colab runtime and save them to the local VS Code workspace.\n\n' +
+        'Typical use: after execute_colab_notebook completes, sync the generated artefacts\n' +
+        '(CSVs, model checkpoints, converted files, …) back to the agent workspace so they\n' +
+        'can be committed, reviewed, or consumed by subsequent pipeline steps.\n\n' +
+        'Each file is downloaded via the colab-mcp bridge and written to workspace_path.\n' +
+        'File names are preserved (basename of the Colab path).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          colab_paths: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'List of absolute file paths inside the Colab runtime to download, ' +
+              'e.g. ["/content/output.csv", "/content/model.pkl"].',
+          },
+          workspace_path: {
+            type: 'string',
+            description:
+              'Local directory where downloaded files will be saved. ' +
+              'Defaults to the current working directory.',
+          },
+        },
+        required: ['colab_paths'],
       },
     },
   ];
@@ -3614,9 +3736,7 @@ export class ToolHandlers {
   /**
    * Handle colab_install_package tool
    */
-  async handleColabInstallPackage(args: {
-    package: string;
-  }): Promise<ToolResult<InstallResult>> {
+  async handleColabInstallPackage(args: { package: string }): Promise<ToolResult<InstallResult>> {
     const { package: pkg } = args;
     log.info(`🔧 [TOOL] colab_install_package called: ${pkg}`);
     try {
@@ -3698,9 +3818,7 @@ export class ToolHandlers {
   /**
    * Handle colab_download_file tool
    */
-  async handleColabDownloadFile(args: {
-    colab_path: string;
-  }): Promise<ToolResult<DownloadResult>> {
+  async handleColabDownloadFile(args: { colab_path: string }): Promise<ToolResult<DownloadResult>> {
     const { colab_path } = args;
     log.info(`🔧 [TOOL] colab_download_file called: ${colab_path}`);
     try {
@@ -3745,6 +3863,224 @@ export class ToolHandlers {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       log.error(`❌ [TOOL] colab_health_check failed: ${errorMessage}`);
+      return { success: false, error: errorMessage };
+    }
+  }
+
+  // ── Colab Workflow Handlers ─────────────────────────────────────────────────
+
+  /**
+   * Handle setup_colab_auth tool
+   *
+   * Launches start-vnc.sh to start Xvfb / x11vnc / noVNC services and returns
+   * the noVNC URL the user can open to supervise or perform Google authentication.
+   */
+  async handleSetupColabAuth(args: { novnc_host?: string }): Promise<ToolResult<VncSetupResult>> {
+    const { novnc_host } = args;
+    log.info('🔧 [TOOL] setup_colab_auth called');
+
+    try {
+      const vncPort = parseInt(process.env.VNC_PORT ?? '5900', 10);
+      const novncPort = parseInt(process.env.NOVNC_PORT ?? '6080', 10);
+      const host = novnc_host ?? process.env.NOVNC_HOST ?? 'localhost';
+
+      // Locate start-vnc.sh relative to this module's package root
+      const scriptPath = path.resolve(process.cwd(), 'scripts', 'start-vnc.sh');
+
+      if (!fs.existsSync(scriptPath)) {
+        throw new Error(
+          `VNC start script not found at ${scriptPath}. ` +
+            'Ensure the container was built with scripts/ copied in.'
+        );
+      }
+
+      await new Promise<void>((resolve, reject) => {
+        const proc = spawn('bash', [scriptPath], {
+          detached: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            VNC_PORT: String(vncPort),
+            NOVNC_PORT: String(novncPort),
+          },
+        });
+
+        let stderr = '';
+        proc.stderr?.on('data', (chunk: Buffer) => {
+          stderr += chunk.toString();
+        });
+
+        // Allow up to 4 s for the background services to start; if the shell
+        // script exits early with a non-zero code, reject immediately.
+        const timer = setTimeout(() => {
+          proc.unref();
+          resolve();
+        }, 4000);
+
+        proc.on('exit', (code) => {
+          clearTimeout(timer);
+          if (code !== null && code !== 0) {
+            reject(new Error(`VNC script exited with code ${code}: ${stderr.trim()}`));
+          } else {
+            proc.unref();
+            resolve();
+          }
+        });
+
+        proc.on('error', (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+      });
+
+      const novncUrl = `http://${host}:${novncPort}/vnc.html`;
+      log.success(`✅ [TOOL] setup_colab_auth: VNC services started. noVNC URL: ${novncUrl}`);
+
+      return {
+        success: true,
+        data: {
+          novnc_url: novncUrl,
+          vnc_port: vncPort,
+          novnc_port: novncPort,
+          message:
+            `VNC services started. Open ${novncUrl} in your browser to supervise ` +
+            'or complete the Google authentication flow.',
+        },
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] setup_colab_auth failed: ${errorMessage}`);
+      return { success: false, error: errorMessage };
+    }
+  }
+
+  /**
+   * Handle manage_colab_runtime tool
+   *
+   * Allocates or releases a Colab GPU/TPU runtime via the colab-mcp bridge.
+   */
+  async handleManageColabRuntime(args: {
+    action: 'allocate' | 'stop' | 'delete';
+    instance_type?: string;
+    timeout_ms?: number;
+  }): Promise<ToolResult<RuntimeManageResult>> {
+    const { action, instance_type, timeout_ms } = args;
+    log.info(
+      `🔧 [TOOL] manage_colab_runtime called: action=${action}` +
+        (instance_type ? `, instance_type=${instance_type}` : '')
+    );
+
+    if (!['allocate', 'stop', 'delete'].includes(action)) {
+      return {
+        success: false,
+        error: `Invalid action "${action}". Must be one of: allocate, stop, delete`,
+      };
+    }
+
+    try {
+      const client = await this.getColabClient();
+      const result = await client.manageRuntime(action, instance_type, timeout_ms);
+      log.success(`✅ [TOOL] manage_colab_runtime: ${result.message}`);
+      return { success: true, data: result };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] manage_colab_runtime failed: ${errorMessage}`);
+      return { success: false, error: errorMessage };
+    }
+  }
+
+  /**
+   * Handle execute_colab_notebook tool
+   *
+   * Opens and executes an existing Colab notebook via the colab-mcp bridge.
+   */
+  async handleExecuteColabNotebook(args: {
+    notebook_path: string;
+    async_execution?: boolean;
+    timeout_ms?: number;
+  }): Promise<ToolResult<NotebookExecuteResult>> {
+    const { notebook_path, async_execution = true, timeout_ms } = args;
+    log.info(`🔧 [TOOL] execute_colab_notebook called: ${notebook_path}`);
+
+    if (!notebook_path || notebook_path.trim().length === 0) {
+      return { success: false, error: 'notebook_path is required and must not be empty' };
+    }
+
+    try {
+      const client = await this.getColabClient();
+      const result = await client.executeNotebook(
+        notebook_path.trim(),
+        async_execution,
+        timeout_ms
+      );
+      log.success(
+        `✅ [TOOL] execute_colab_notebook: status=${result.status} (execution_id: ${result.execution_id})`
+      );
+      return { success: true, data: result };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] execute_colab_notebook failed: ${errorMessage}`);
+      return { success: false, error: errorMessage };
+    }
+  }
+
+  /**
+   * Handle sync_github_artifacts tool
+   *
+   * Downloads Colab output files and writes them to the local VS Code workspace
+   * so the agent can commit, review, or use them in subsequent pipeline steps.
+   */
+  async handleSyncGithubArtifacts(args: {
+    colab_paths: string[];
+    workspace_path?: string;
+  }): Promise<ToolResult<ArtifactSyncResult>> {
+    const { colab_paths, workspace_path } = args;
+    const targetDir = path.resolve(workspace_path ?? process.cwd());
+    log.info(
+      `🔧 [TOOL] sync_github_artifacts called: ${colab_paths.length} file(s) → ${targetDir}`
+    );
+
+    if (!Array.isArray(colab_paths) || colab_paths.length === 0) {
+      return { success: false, error: 'colab_paths must be a non-empty array of file paths' };
+    }
+
+    try {
+      const client = await this.getColabClient();
+
+      // Ensure target directory exists
+      if (!fs.existsSync(targetDir)) {
+        fs.mkdirSync(targetDir, { recursive: true });
+      }
+
+      const filesSynced: string[] = [];
+      let totalBytes = 0;
+
+      for (const colabPath of colab_paths) {
+        const downloadResult = await client.downloadFile(colabPath);
+        const fileName = path.basename(colabPath);
+        const localPath = path.join(targetDir, fileName);
+        const fileBuffer = Buffer.from(downloadResult.content_base64, 'base64');
+        fs.writeFileSync(localPath, fileBuffer);
+        totalBytes += downloadResult.size_bytes;
+        filesSynced.push(localPath);
+        log.info(`  📥 Synced: ${colabPath} → ${localPath} (${downloadResult.size_bytes} bytes)`);
+      }
+
+      log.success(
+        `✅ [TOOL] sync_github_artifacts: ${filesSynced.length} file(s) synced (${totalBytes} bytes total)`
+      );
+      return {
+        success: true,
+        data: {
+          files_synced: filesSynced,
+          workspace_path: targetDir,
+          total_bytes: totalBytes,
+          message: `Successfully synced ${filesSynced.length} file(s) to ${targetDir}`,
+        },
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] sync_github_artifacts failed: ${errorMessage}`);
       return { success: false, error: errorMessage };
     }
   }

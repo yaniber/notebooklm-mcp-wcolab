@@ -334,7 +334,11 @@ describe('ColabBridgeClient', () => {
           id: req.id,
           action: req.action,
           success: true,
-          result: { file_path: '/local/data.csv', destination: '/content/data.csv', size_bytes: 512 },
+          result: {
+            file_path: '/local/data.csv',
+            destination: '/content/data.csv',
+            size_bytes: 512,
+          },
         };
       });
 
@@ -353,7 +357,11 @@ describe('ColabBridgeClient', () => {
 
   describe('downloadFile', () => {
     it('sends download_file request and returns result', async () => {
-      const mockResult = { colab_path: '/content/out.csv', content_base64: 'aGVsbG8=', size_bytes: 5 };
+      const mockResult = {
+        colab_path: '/content/out.csv',
+        content_base64: 'aGVsbG8=',
+        size_bytes: 5,
+      };
 
       const { wss, url } = await startMockServer((req) => ({
         id: req.id,
@@ -367,6 +375,165 @@ describe('ColabBridgeClient', () => {
         await client.connect();
         const result = await client.downloadFile('/content/out.csv');
         expect(result.content_base64).toBe('aGVsbG8=');
+        client.disconnect();
+      } finally {
+        await stopServer(wss);
+      }
+    });
+  });
+
+  // ── manageRuntime ─────────────────────────────────────────────────────────
+
+  describe('manageRuntime', () => {
+    it('sends manage_runtime with allocate action and returns result', async () => {
+      const mockResult = {
+        action: 'allocate',
+        instance_type: 'T4',
+        status: 'success',
+        runtime_id: 'rt-001',
+        message: 'T4 GPU allocated',
+      };
+
+      const { wss, url } = await startMockServer((req) => ({
+        id: req.id,
+        action: req.action,
+        success: true,
+        result: mockResult,
+      }));
+
+      try {
+        const client = ColabBridgeClient.getInstance(url);
+        await client.connect();
+        const result = await client.manageRuntime('allocate', 'T4');
+        expect(result.action).toBe('allocate');
+        expect(result.instance_type).toBe('T4');
+        expect(result.status).toBe('success');
+        client.disconnect();
+      } finally {
+        await stopServer(wss);
+      }
+    });
+
+    it('throws when GPU allocation fails', async () => {
+      const { wss, url } = await startMockServer((req) => ({
+        id: req.id,
+        action: req.action,
+        success: false,
+        error: 'No GPU quota available',
+      }));
+
+      try {
+        const client = ColabBridgeClient.getInstance(url);
+        await client.connect();
+        await expect(client.manageRuntime('allocate', 'T4')).rejects.toThrow('No GPU quota');
+        client.disconnect();
+      } finally {
+        await stopServer(wss);
+      }
+    });
+
+    it('sends delete action to release runtime', async () => {
+      const captured: ColabRequest[] = [];
+      const { wss, url } = await startMockServer((req) => {
+        captured.push(req);
+        return {
+          id: req.id,
+          action: req.action,
+          success: true,
+          result: { action: 'delete', status: 'success', message: 'Runtime deleted' },
+        };
+      });
+
+      try {
+        const client = ColabBridgeClient.getInstance(url);
+        await client.connect();
+        await client.manageRuntime('delete');
+        expect(captured[0].action).toBe('manage_runtime');
+        expect(captured[0].params?.action).toBe('delete');
+        client.disconnect();
+      } finally {
+        await stopServer(wss);
+      }
+    });
+  });
+
+  // ── executeNotebook ───────────────────────────────────────────────────────
+
+  describe('executeNotebook', () => {
+    it('sends execute_notebook and returns execution result', async () => {
+      const mockResult = {
+        notebook_path: 'ColabNotebooks/Colab_Conversion_Only.ipynb',
+        execution_id: 'exec-42',
+        status: 'started',
+        async_execution: true,
+        message: 'Notebook execution started',
+      };
+
+      const { wss, url } = await startMockServer((req) => ({
+        id: req.id,
+        action: req.action,
+        success: true,
+        result: mockResult,
+      }));
+
+      try {
+        const client = ColabBridgeClient.getInstance(url);
+        await client.connect();
+        const result = await client.executeNotebook(
+          'ColabNotebooks/Colab_Conversion_Only.ipynb',
+          true
+        );
+        expect(result.execution_id).toBe('exec-42');
+        expect(result.status).toBe('started');
+        client.disconnect();
+      } finally {
+        await stopServer(wss);
+      }
+    });
+
+    it('throws when notebook path is invalid', async () => {
+      const { wss, url } = await startMockServer((req) => ({
+        id: req.id,
+        action: req.action,
+        success: false,
+        error: 'Notebook not found: missing.ipynb',
+      }));
+
+      try {
+        const client = ColabBridgeClient.getInstance(url);
+        await client.connect();
+        await expect(client.executeNotebook('missing.ipynb')).rejects.toThrow('Notebook not found');
+        client.disconnect();
+      } finally {
+        await stopServer(wss);
+      }
+    });
+  });
+
+  // ── syncArtifacts ─────────────────────────────────────────────────────────
+
+  describe('syncArtifacts', () => {
+    it('sends sync_artifacts with correct params', async () => {
+      const captured: ColabRequest[] = [];
+      const mockResult = {
+        files_synced: ['/workspace/output.csv'],
+        workspace_path: '/workspace',
+        total_bytes: 1024,
+        message: '1 file(s) synced',
+      };
+
+      const { wss, url } = await startMockServer((req) => {
+        captured.push(req);
+        return { id: req.id, action: req.action, success: true, result: mockResult };
+      });
+
+      try {
+        const client = ColabBridgeClient.getInstance(url);
+        await client.connect();
+        const result = await client.syncArtifacts(['/content/output.csv'], '/workspace');
+        expect(captured[0].action).toBe('sync_artifacts');
+        expect(captured[0].params?.colab_paths).toEqual(['/content/output.csv']);
+        expect(result.total_bytes).toBe(1024);
         client.disconnect();
       } finally {
         await stopServer(wss);

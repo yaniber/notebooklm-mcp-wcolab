@@ -143,6 +143,53 @@ describe('ToolHandlers', () => {
       expect(cleanup).toBeDefined();
     });
 
+    it('should include colab bridge tools', () => {
+      const tools = buildToolDefinitions(mockLibrary);
+
+      const toolNames = tools.map((t: any) => t.name);
+      expect(toolNames).toContain('colab_execute_python');
+      expect(toolNames).toContain('colab_health_check');
+      expect(toolNames).toContain('colab_get_session_status');
+    });
+
+    it('should include colab workflow tools', () => {
+      const tools = buildToolDefinitions(mockLibrary);
+
+      const toolNames = tools.map((t: any) => t.name);
+      expect(toolNames).toContain('setup_colab_auth');
+      expect(toolNames).toContain('manage_colab_runtime');
+      expect(toolNames).toContain('execute_colab_notebook');
+      expect(toolNames).toContain('sync_github_artifacts');
+    });
+
+    it('should require action for manage_colab_runtime', () => {
+      const tools = buildToolDefinitions(mockLibrary);
+
+      const tool = tools.find((t: any) => t.name === 'manage_colab_runtime');
+      expect(tool).toBeDefined();
+      expect(tool.inputSchema.required).toContain('action');
+      expect(tool.inputSchema.properties.action.enum).toEqual(
+        expect.arrayContaining(['allocate', 'stop', 'delete'])
+      );
+    });
+
+    it('should require notebook_path for execute_colab_notebook', () => {
+      const tools = buildToolDefinitions(mockLibrary);
+
+      const tool = tools.find((t: any) => t.name === 'execute_colab_notebook');
+      expect(tool).toBeDefined();
+      expect(tool.inputSchema.required).toContain('notebook_path');
+    });
+
+    it('should require colab_paths for sync_github_artifacts', () => {
+      const tools = buildToolDefinitions(mockLibrary);
+
+      const tool = tools.find((t: any) => t.name === 'sync_github_artifacts');
+      expect(tool).toBeDefined();
+      expect(tool.inputSchema.required).toContain('colab_paths');
+      expect(tool.inputSchema.properties.colab_paths.type).toBe('array');
+    });
+
     it('should have valid inputSchema for all tools', () => {
       const tools = buildToolDefinitions(mockLibrary);
 
